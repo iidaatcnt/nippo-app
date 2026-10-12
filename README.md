@@ -29,24 +29,27 @@
 
 ## セットアップ
 
-```bash
-npm install
+D1 データベース `nippo-db` は作成済みで、ID は `wrangler.jsonc` に設定してあります。
 
-# 1. D1 データベースを作成し、出力された database_id を wrangler.jsonc に書き込む
-npx wrangler d1 create nippo-db
+### Cloudflare から GitHub を連携してデプロイする（おすすめ）
 
-# 2. テーブルを作成
-npm run db:migrate:remote
+1. Cloudflare ダッシュボードの「Workers & Pages」→「作成」→「リポジトリをインポート」で `iidaatcnt/nippo-app` を選ぶ
+2. デプロイコマンドを `npm run deploy` にする（テーブル作成 → デプロイを続けて実行します）
+3. 初回デプロイ後、Worker の「設定」→「変数とシークレット」に、シークレット `SETUP_TOKEN`（任意の長い文字列）を追加する
 
-# 3. 初期セットアップ用のトークンを登録（最初の管理者を作るときだけ使います）
-npx wrangler secret put SETUP_TOKEN
-
-# 4. デプロイ
-npm run deploy
-```
+以後は main にマージするたびに自動でデプロイされます。
 
 デプロイ後に URL を開くと初期セットアップ画面が出ます。SETUP_TOKEN と管理者のメールアドレス・パスワードを入力すると、システム管理者として使い始められます。
 その後「管理」から企業を追加し、社長・上長・社員を招待します（招待リンクを Chatwork やメールで送ってください）。
+
+### 手元のコマンドでデプロイする場合
+
+```bash
+npm install
+npx wrangler login
+npm run deploy
+npx wrangler secret put SETUP_TOKEN
+```
 
 ### ローカルで動かす
 
@@ -57,7 +60,7 @@ npm run dev        # http://localhost:8787
 npm test           # 兆候検知ルールのテスト
 ```
 
-### GitHub からの自動デプロイ
+### GitHub Actions からの自動デプロイ（上の連携を使わない場合）
 
 `.github/workflows/deploy.yml` が main へのマージで「マイグレーション → デプロイ」を実行します。
 リポジトリの Settings で次を設定すると有効になります。

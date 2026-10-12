@@ -8,8 +8,7 @@
     {
       "binding": "DB",
       "database_name": "nippo-db",
-      // `wrangler d1 create nippo-db` の結果に置き換えてください
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "c1b8eac6-b3b4-4557-8b0c-ff3698724502",
       "migrations_dir": "migrations"
     }
   ],
