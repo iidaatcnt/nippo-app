@@ -693,6 +693,7 @@ async function viewEmployee(id) {
 async function viewAdmin() {
   const tenantId = currentTenantId();
   const tenant = isLabor() ? currentTenant() : (await api("/admin/tenants"))[0];
+  const demo = me.role === "sysadmin" ? await api("/admin/demo") : { exists: false };
   const users = tenantId ? await api(`/admin/users?tenant_id=${tenantId}`) : [];
   const roleOptions = ["employee", "supervisor", "owner", ...(isLabor() ? ["labor"] : [])];
   const supOptions = (sel, exclude) =>
@@ -705,6 +706,14 @@ async function viewAdmin() {
     <div class="card">
       <h2 style="margin-top:0">企業を追加</h2>
       <form id="tf" class="row"><input type="text" name="name" placeholder="企業名" required style="flex:1"><button type="submit" class="primary">追加</button><span class="error"></span></form>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">デモデータ</h2>
+      ${demo.exists ? `
+      <p class="muted">「デモ株式会社」が入っています（社員10人・約2ヶ月分）。消すと、デモ会社の日報・アラートなどもすべて消えます。</p>
+      <button type="button" id="demo-clear">デモデータを消す</button>` : `
+      <p class="muted">「デモ株式会社」（社長・上長2人・社員10人・労務担当）と、約2ヶ月分の日報・コメント・相談・アラートを入れます。デモユーザーは全員、下のパスワードでログインできます。</p>
+      <form id="df" class="row"><input type="password" name="password" placeholder="デモユーザーのパスワード（10文字以上）" minlength="10" autocomplete="new-password" required style="flex:1"><button type="submit" class="primary">デモデータを入れる</button><span class="error"></span></form>`}
     </div>` : ""}
     ${tenant ? `
     <div class="card">
@@ -748,6 +757,25 @@ async function viewAdmin() {
         .join("")}
     </table></div>` : `<p class="muted">企業がありません。上で追加してください。</p>`}`);
 
+  const df = document.getElementById("df");
+  if (df) onSubmit(df, async (d) => {
+    await api("/admin/demo", { method: "POST", body: d });
+    laborTenants = await api("/labor/tenants");
+    toast("デモデータを入れました");
+    route();
+  });
+  document.getElementById("demo-clear")?.addEventListener("click", async () => {
+    if (!confirm("デモ株式会社のデータをすべて消します。よろしいですか？")) return;
+    try {
+      await api("/admin/demo", { method: "DELETE" });
+    } catch (ex) {
+      return toast(ex.message);
+    }
+    laborTenants = await api("/labor/tenants");
+    try { localStorage.removeItem("tenant_id"); } catch {}
+    toast("デモデータを消しました");
+    route();
+  });
   const tf = document.getElementById("tf");
   if (tf) onSubmit(tf, async (d) => {
     const t = await api("/admin/tenants", { method: "POST", body: d });

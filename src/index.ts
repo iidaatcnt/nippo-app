@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, randomToken, sha256 } from "./crypto";
 import { runDetection, insertAlerts, matchKeywords, jstToday, addDays, safeJson, type KeywordRule, type AlertDraft } from "./detect";
+import { buildDemoSql, DEMO_CLEAR_SQL, DEMO_ID_BASE_SQL, DEMO_TENANT_ID, type DemoIdBase } from "./demo";
 
 type Env = {
   DB: D1Database;
@@ -656,6 +657,34 @@ app.post("/admin/tenants", async (c) => {
     .bind(name, JSON.stringify({ showEndTime: true, showKK: false, standardEnd: "17:30" }))
     .first<{ id: number }>();
   return c.json(row);
+});
+
+/** デモ会社（デモ株式会社）の有無 */
+app.get("/admin/demo", async (c) => {
+  if (c.get("me").role !== "sysadmin") fail(403, "権限がありません");
+  const t = await c.env.DB.prepare("SELECT id FROM tenants WHERE id = ?").bind(DEMO_TENANT_ID).first();
+  return c.json({ exists: !!t });
+});
+
+/** デモデータを入れる（約2ヶ月分。デモユーザー全員に同じパスワードを設定） */
+app.post("/admin/demo", async (c) => {
+  if (c.get("me").role !== "sysadmin") fail(403, "権限がありません");
+  const password = str((await c.req.json()).password, 200);
+  if (password.length < 10) fail(400, "デモユーザーのパスワードは10文字以上にしてください");
+  if (await c.env.DB.prepare("SELECT id FROM tenants WHERE id = ?").bind(DEMO_TENANT_ID).first()) fail(400, "デモデータは入っています。入れ直すときは先に消してください");
+  const base = await c.env.DB.prepare(DEMO_ID_BASE_SQL).first<DemoIdBase>();
+  const sql = buildDemoSql(jstToday(), await hashPassword(password), base!);
+  await c.env.DB.batch(sql.map((s) => c.env.DB.prepare(s)));
+  await audit(c, "demo_insert");
+  return c.json({ ok: true });
+});
+
+/** デモデータを消す */
+app.delete("/admin/demo", async (c) => {
+  if (c.get("me").role !== "sysadmin") fail(403, "権限がありません");
+  await c.env.DB.batch(DEMO_CLEAR_SQL.map((s) => c.env.DB.prepare(s)));
+  await audit(c, "demo_clear");
+  return c.json({ ok: true });
 });
 
 app.patch("/admin/tenants/:id", async (c) => {
