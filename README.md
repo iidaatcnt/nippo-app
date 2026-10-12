@@ -68,6 +68,136 @@ npm test           # 兆候検知ルールのテスト
 - Variables：`DEPLOY_ENABLED` = `true`
 - Secrets：`CLOUDFLARE_API_TOKEN`（Workers と D1 の編集権限）、`CLOUDFLARE_ACCOUNT_ID`
 
+## デモデータ
+
+システム管理者でログインし、「管理」→「デモデータ」にデモユーザー用のパスワードを入れて「デモデータを入れる」を押すと、「デモ株式会社」（社長1・上長2・社員10・労務担当1）の約2ヶ月分のデータが入ります。
+日付は押した日から逆算し、前営業日までの日報を作ります。コメント・既読、労務担当への相談、アラートとその対応記録、社員ステータスの履歴も含みます。アラートは夜間の兆候検知（`src/detect.ts`）を過去の日付で再現して作っているので、本番の検知と同じ形です。
+同じ画面の「デモデータを消す」で、デモ会社のデータだけをまとめて消せます（生成のしくみは `src/demo.ts`）。
+
+社員ごとに次のような筋書きがあります。
+
+| 社員 | 筋書き |
+|---|---|
+| 鈴木 美咲 | 1ヶ月ほど前から調子が落ち、「怒鳴られ」「眠れない」「無視され」が出る。上長の反応が途絶え、労務担当に相談（対応中） |
+| 高橋 翔 | 退勤が遅くなり続け、時間外が月45時間・80時間の見込みを超える |
+| 山本 拓也 | 2週間ほど前から調子が落ち、ここ数日は日報が止まっている |
+| 伊藤 大輔 | 直近1週間ほど、日報の記述が極端に短い |
+| 中村 優子 | 期間の前半に一時的に不調、面談後に回復（解決済み） |
+| 加藤 愛 | 月末だけ「疲れた」が出る |
+| その他 | 普段どおり |
+
+デモユーザーのメールアドレス（パスワードは入れるときに決めたもの）：
+
+| 役割 | メールアドレス |
+|---|---|
+| 社長 | `demo-owner@example.com` |
+| 上長（営業） | `demo-kimura@example.com` |
+| 上長（業務） | `demo-hayashi@example.com` |
+| 社員 | `demo-suzuki@example.com`、`demo-takahashi@example.com` など（`src/demo.ts` に一覧） |
+| 労務担当 | `demo-labor@example.com` |
+
+デモ会社の ID は `9000` です。
+
+## 日報データの分析
+
+日報はすべて D1（SQLite）に溜まっているので、SQL でそのまま集計できます。
+
+### どこで SQL を実行するか
+
+- **Cloudflare ダッシュボード**：「ストレージとデータベース」→「D1」→ `nippo-db` →「コンソール」に SQL を貼って実行
+- **コマンド**：`npx wrangler d1 execute nippo-db --remote --command "SELECT ..." --json`
+- **Excel などで見たいとき**：`npx wrangler d1 export nippo-db --remote --output nippo.sql` で丸ごと書き出し、`sqlite3 nippo.db < nippo.sql` で手元の SQLite に取り込み、`sqlite3 -header -csv nippo.db "SELECT ..." > 結果.csv` で CSV にする
+- **Claude に頼む**：書き出した CSV を渡して「調子が落ちている人と理由を教えて」のように聞くこともできます
+
+### 主なテーブル
+
+| テーブル | 中身 |
+|---|---|
+| `reports` | 日報。`report_date`（日付）、`condition`（調子 1〜5）、`done`（やったこと）、`redo`（やり直せるなら）、`growth`（気づき）、`plan`（明日の予定）、`end_time`（退勤時刻） |
+| `users` | 社員。`role`、`supervisor_id`（上長）、`tenant_id`（会社） |
+| `comments` | 上長のコメント（`kind='comment'`）と「見たよ」（`kind='like'`） |
+| `report_reads` | 既読 |
+| `alerts` / `alert_notes` | 兆候アラートと対応記録 |
+| `employee_status` / `status_history` | 社員の現在のステータスと変更履歴 |
+| `consultations` | 労務担当への相談（**本人と労務担当以外には見せない情報です。扱いに注意してください**） |
+
+### 集計の例
+
+社員ごとの月別の提出日数と平均の調子：
+
+```sql
+SELECT u.name, substr(r.report_date, 1, 7) AS month,
+       COUNT(*) AS days, ROUND(AVG(r.condition), 2) AS avg_condition
+FROM reports r JOIN users u ON u.id = r.user_id
+WHERE r.tenant_id = 9000
+GROUP BY u.id, month ORDER BY u.name, month;
+```
+
+週ごとの調子の推移（会社全体）：
+
+```sql
+SELECT date(report_date, '-6 days', 'weekday 1') AS week,
+       ROUND(AVG(condition), 2) AS avg_condition, COUNT(*) AS reports
+FROM reports WHERE tenant_id = 9000
+GROUP BY week ORDER BY week;
+```
+
+月別の時間外の推計（退勤時刻と所定終業 17:30 の差）：
+
+```sql
+SELECT u.name, substr(r.report_date, 1, 7) AS month,
+       ROUND(SUM(MAX(0, (CAST(substr(r.end_time, 1, 2) AS INTEGER) * 60 + CAST(substr(r.end_time, 4, 2) AS INTEGER)) - (17 * 60 + 30))) / 60.0, 1) AS overtime_hours
+FROM reports r JOIN users u ON u.id = r.user_id
+WHERE r.tenant_id = 9000 AND r.end_time IS NOT NULL
+GROUP BY u.id, month ORDER BY overtime_hours DESC;
+```
+
+上長ごとの反応率（部下の日報にコメントか「見たよ」をした割合）：
+
+```sql
+SELECT su.name AS supervisor, COUNT(DISTINCT r.id) AS reports,
+       ROUND(100.0 * COUNT(DISTINCT c.report_id) / COUNT(DISTINCT r.id), 1) AS reaction_pct
+FROM reports r
+JOIN users u ON u.id = r.user_id
+JOIN users su ON su.id = u.supervisor_id
+LEFT JOIN comments c ON c.report_id = r.id AND c.user_id = su.id
+WHERE r.tenant_id = 9000
+GROUP BY su.id;
+```
+
+気になる言葉を含む日報：
+
+```sql
+SELECT r.report_date, u.name, k.word, k.severity
+FROM reports r
+JOIN users u ON u.id = r.user_id
+JOIN keyword_rules k ON (k.tenant_id IS NULL OR k.tenant_id = r.tenant_id)
+  AND instr(r.done || r.redo || r.growth || r.plan, k.word) > 0
+WHERE r.tenant_id = 9000
+ORDER BY r.report_date DESC;
+```
+
+アラートの種類と対応状況：
+
+```sql
+SELECT kind, status, COUNT(*) AS n
+FROM alerts WHERE tenant_id = 9000
+GROUP BY kind, status ORDER BY kind, status;
+```
+
+日報の文字数の推移（記述が短くなっている人を探す）：
+
+```sql
+SELECT u.name, date(r.report_date, '-6 days', 'weekday 1') AS week,
+       ROUND(AVG(length(r.done || r.redo || r.growth)), 0) AS avg_chars
+FROM reports r JOIN users u ON u.id = r.user_id
+WHERE r.tenant_id = 9000
+GROUP BY u.id, week ORDER BY u.name, week;
+```
+
+`tenant_id = 9000` はデモ会社です。実際の会社は `SELECT id, name FROM tenants;` で ID を確かめて置き換えてください。
+日付・時刻のうち `report_date` は日本時間、`created_at` などの時刻は UTC（日本時間の9時間前）で保存しています。
+
 ## 今後の予定
 
 - Chatwork／メールでのアラート通知
