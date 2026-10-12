@@ -50,7 +50,8 @@ async function api(path, { method = "GET", body } = {}) {
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && !path.startsWith("/login") && !path.startsWith("/invite")) {
     me = null;
-    location.hash = "#/login";
+    // セットアップ・招待などログイン前の画面にいるときはログイン画面へ飛ばさない
+    if (!PUBLIC.some((r) => r.test(location.hash))) location.hash = "#/login";
     throw new Error(data.error || "ログインしてください");
   }
   if (!res.ok) throw new Error(data.error || "エラーが発生しました");
@@ -180,7 +181,12 @@ window.addEventListener("hashchange", route);
 
 // ---- 認証まわり ----
 
-function viewLogin() {
+async function viewLogin() {
+  const setup = await api("/setup").catch(() => ({}));
+  if (setup.needed) {
+    location.hash = "#/setup";
+    return;
+  }
   render(`
     <div class="card">
       <h1>ログイン</h1>
