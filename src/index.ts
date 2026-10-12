@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { hashPassword, verifyPassword, randomToken, sha256 } from "./crypto";
 import { runDetection, insertAlerts, matchKeywords, jstToday, addDays, safeJson, type KeywordRule, type AlertDraft } from "./detect";
+import { parseRoster } from "./csv";
 import { buildDemoSql, DEMO_CLEAR_SQL, DEMO_ID_BASE_SQL, DEMO_TENANT_ID, type DemoIdBase } from "./demo";
 
 type Env = {
@@ -771,6 +772,71 @@ app.post("/admin/users", async (c) => {
   await audit(c, "create_user", `user:${row!.id}`);
   return c.json({ id: row!.id, invite_url: await issueInvite(c, row!.id) });
 });
+
+/**
+ * 社員名簿 CSV でまとめて登録する。
+ * dry_run なら確認結果だけ返す。誤りが1件でもあれば何も登録しない。
+ * 上長は、CSV 内の人か、同じ企業に登録済みの人のメールアドレスで指定する。
+ */
+app.post("/admin/users/import", async (c) => {
+  const b = await c.req.json();
+  const tenantId = Number(b.tenant_id);
+  if (!tenantId || !(await canManageTenant(c, tenantId))) fail(403, "権限がありません");
+  const { rows, errors } = parseRoster(typeof b.csv === "string" ? b.csv : "");
+
+  const emails = [...new Set(rows.flatMap((r) => [r.email, r.supervisorEmail]).filter(Boolean))];
+  const existing = new Map<string, { id: number; tenant_id: number | null; active: number }>();
+  for (const part of chunkList(emails, 90)) {
+    const res = await c.env.DB.prepare(`SELECT id, email, tenant_id, active FROM users WHERE email IN (${part.map(() => "?").join(",")})`)
+      .bind(...part)
+      .all<{ id: number; email: string; tenant_id: number | null; active: number }>();
+    for (const u of res.results) existing.set(u.email, u);
+  }
+  const inCsv = new Set(rows.map((r) => r.email));
+  for (const r of rows) {
+    if (existing.has(r.email)) errors.push(`${r.line}行目: ${r.email} は登録済みです`);
+    if (r.supervisorEmail && !inCsv.has(r.supervisorEmail)) {
+      const s = existing.get(r.supervisorEmail);
+      if (!s || s.tenant_id !== tenantId || !s.active) errors.push(`${r.line}行目: 上長 ${r.supervisorEmail} がこの CSV にも、この企業の利用者にもいません`);
+    }
+  }
+  const preview = rows.map((r) => ({ line: r.line, name: r.name, email: r.email, role: r.role, supervisor_email: r.supervisorEmail }));
+  if (errors.length || b.dry_run) return c.json({ ok: !errors.length, errors, rows: preview });
+
+  // 登録 → 上長の設定 → 招待リンク を1つのバッチで行う（途中で失敗したら全部取り消される）
+  const db = c.env.DB;
+  const tokens = await Promise.all(rows.map(async () => {
+    const token = randomToken();
+    return { token, hash: await sha256(token) };
+  }));
+  // 無料プランは1回の処理で使えるクエリ数が少ないので、複数行をまとめて入れる（1文のパラメータは100個まで）
+  const stmts: D1PreparedStatement[] = [];
+  for (const part of chunkList(rows, 25))
+    stmts.push(db.prepare(`INSERT INTO users (tenant_id, email, name, role) VALUES ${part.map(() => "(?, ?, ?, ?)").join(", ")}`)
+      .bind(...part.flatMap((r) => [tenantId, r.email, r.name, r.role])));
+  for (const part of chunkList(rows.filter((r) => r.supervisorEmail), 30))
+    stmts.push(db.prepare(
+      `UPDATE users SET supervisor_id = (SELECT s.id FROM users s WHERE s.email = CASE users.email ${part.map(() => "WHEN ? THEN ?").join(" ")} END)
+       WHERE email IN (${part.map(() => "?").join(", ")})`,
+    ).bind(...part.flatMap((r) => [r.email, r.supervisorEmail]), ...part.map((r) => r.email)));
+  const expires = sqlNow(INVITE_DAYS);
+  for (const part of chunkList(rows.map((r, i) => ({ email: r.email, hash: tokens[i].hash })), 30))
+    stmts.push(db.prepare(
+      `INSERT INTO invites (token_hash, user_id, expires_at) VALUES ${part.map(() => "(?, (SELECT id FROM users WHERE email = ?), ?)").join(", ")}`,
+    ).bind(...part.flatMap((x) => [x.hash, x.email, expires])));
+  await db.batch(stmts);
+  await audit(c, "import_users", `tenant:${tenantId}:${rows.length}`);
+  const origin = new URL(c.req.url).origin;
+  return c.json({
+    ok: true,
+    errors: [],
+    rows: preview.map((r, i) => ({ ...r, invite_url: `${origin}/#/invite/${tokens[i].token}` })),
+  });
+});
+
+function chunkList<T>(xs: T[], n: number): T[][] {
+  return Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, i * n + n));
+}
 
 async function loadManagedUser(c: C, id: number) {
   const u = await c.env.DB.prepare("SELECT id, tenant_id, role FROM users WHERE id = ?").bind(id).first<{ id: number; tenant_id: number | null; role: Role }>();

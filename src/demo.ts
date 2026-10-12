@@ -352,27 +352,27 @@ export function buildDemoSql(today: string, passwordHash: string | null, base: D
   // ---- SQL ----
   const sql: string[] = [];
   sql.push(`INSERT INTO tenants (id, name, settings, created_at) VALUES (${TENANT}, 'デモ株式会社', '{"showEndTime":true,"showKK":false,"standardEnd":"17:30"}', ${q(created)});`);
-  for (const p of P) {
-    const tenant = p.role === "labor" ? "NULL" : TENANT;
-    sql.push(`INSERT INTO users (id, tenant_id, email, name, role, supervisor_id, password_hash, consented_at, created_at) VALUES (${p.id}, ${tenant}, ${q(p.email)}, ${q(p.name)}, '${p.role}', ${p.sup ?? "NULL"}, ${q(passwordHash)}, ${q(created)}, ${q(created)});`);
-  }
+  sql.push(`INSERT INTO users (id, tenant_id, email, name, role, supervisor_id, password_hash, consented_at, created_at) VALUES\n` +
+    P.map((p) => `(${p.id}, ${p.role === "labor" ? "NULL" : TENANT}, ${q(p.email)}, ${q(p.name)}, '${p.role}', ${p.sup ?? "NULL"}, ${q(passwordHash)}, ${q(created)}, ${q(created)})`).join(",\n") + ";");
   sql.push(`INSERT INTO labor_assignments (user_id, tenant_id) VALUES (${LABOR}, ${TENANT});`);
-  for (const c of chunk(reports, 50))
+  for (const c of chunk(reports, 100))
     sql.push(`INSERT INTO reports (id, user_id, tenant_id, report_date, condition, done, redo, growth, plan, end_time, created_at, updated_at) VALUES\n` +
       c.map((r) => `(${r.id}, ${r.user}, ${TENANT}, ${q(r.report_date)}, ${r.condition}, ${q(r.done)}, ${q(r.redo)}, ${q(r.growth)}, ${q(r.plan)}, ${q(r.end_time)}, ${q(r.created)}, ${q(r.created)})`).join(",\n") + ";");
-  for (const c of chunk(comments, 100))
+  for (const c of chunk(comments, 200))
     sql.push(`INSERT INTO comments (id, report_id, user_id, kind, body, created_at) VALUES\n` + c.map((x) => `(${x.id}, ${x.report}, ${x.user}, '${x.kind}', ${q(x.body)}, ${q(x.created)})`).join(",\n") + ";");
-  for (const c of chunk(reads, 200))
+  for (const c of chunk(reads, 400))
     sql.push(`INSERT INTO report_reads (report_id, user_id, read_at) VALUES\n` + c.map((x) => `(${x.report}, ${x.user}, ${q(x.at)})`).join(",\n") + ";");
   for (const c of consultations)
     sql.push(`INSERT INTO consultations (id, user_id, tenant_id, report_id, body, created_at) VALUES (${c.id}, ${c.user}, ${TENANT}, ${c.report}, ${q(c.body)}, ${q(c.created)});`);
-  for (const c of chunk(alertList, 50))
+  for (const c of chunk(alertList, 100))
     sql.push(`INSERT INTO alerts (id, tenant_id, user_id, kind, severity, detail, dedupe_key, status, created_at, updated_at) VALUES\n` +
       c.map((a) => `(${a.id}, ${TENANT}, ${a.user}, '${a.kind}', '${a.severity}', ${q(a.detail)}, ${q(a.key)}, '${statusOf(a)}', ${q(a.created)}, ${q(a.created)})`).join(",\n") + ";");
-  notes.forEach((n, i) => sql.push(`INSERT INTO alert_notes (id, alert_id, user_id, body, created_at) VALUES (${base.note + 1 + i}, ${n.alert}, ${LABOR}, ${q(n.body)}, ${q(n.created)});`));
-  for (const [user, st, n] of STATUS)
-    sql.push(`INSERT INTO employee_status (user_id, status, note, updated_by, updated_at) VALUES (${user}, '${st}', ${q(n)}, ${LABOR}, ${q(utc(HISTORY.filter((h) => h[0] === user).at(-1)?.[4] ?? ago(1), "11:00"))});`);
-  HISTORY.forEach(([user, from, to, n, date], i) =>
-    sql.push(`INSERT INTO status_history (id, user_id, old_status, new_status, note, changed_by, created_at) VALUES (${base.history + 1 + i}, ${user}, ${q(from)}, '${to}', ${q(n)}, ${LABOR}, ${q(utc(date, "11:00"))});`));
+  if (notes.length)
+    sql.push(`INSERT INTO alert_notes (id, alert_id, user_id, body, created_at) VALUES\n` +
+      notes.map((n, i) => `(${base.note + 1 + i}, ${n.alert}, ${LABOR}, ${q(n.body)}, ${q(n.created)})`).join(",\n") + ";");
+  sql.push(`INSERT INTO employee_status (user_id, status, note, updated_by, updated_at) VALUES\n` +
+    STATUS.map(([user, st, n]) => `(${user}, '${st}', ${q(n)}, ${LABOR}, ${q(utc(HISTORY.filter((h) => h[0] === user).at(-1)?.[4] ?? ago(1), "11:00"))})`).join(",\n") + ";");
+  sql.push(`INSERT INTO status_history (id, user_id, old_status, new_status, note, changed_by, created_at) VALUES\n` +
+    HISTORY.map(([user, from, to, n, date], i) => `(${base.history + 1 + i}, ${user}, ${q(from)}, '${to}', ${q(n)}, ${LABOR}, ${q(utc(date, "11:00"))})`).join(",\n") + ";");
   return sql;
 }
