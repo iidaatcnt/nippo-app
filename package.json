@@ -1,0 +1,23 @@
+{
+  "name": "nippo-app",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply nippo-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply nippo-db --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261012.1",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.4",
+    "wrangler": "^4.149.0"
+  }
+}

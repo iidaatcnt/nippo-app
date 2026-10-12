@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nippo-app",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./public", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nippo-db",
+      // `wrangler d1 create nippo-db` の結果に置き換えてください
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // 毎晩 2:00 JST（17:00 UTC）に集計・兆候検知
+  "triggers": { "crons": ["0 17 * * *"] },
+  "vars": { "APP_NAME": "日報" }
+}
