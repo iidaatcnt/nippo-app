@@ -21,3 +21,9 @@ describe("デモデータ", () => {
     expect(buildDemoSql("2026-10-13", null, base).join("\n")).toBe(sql);
   });
 });
+
+describe("デモデータの文の数", () => {
+  it("無料プランのクエリ上限（50）に収まる", () => {
+    expect(buildDemoSql("2026-10-13", null, base).length).toBeLessThan(30);
+  });
+});

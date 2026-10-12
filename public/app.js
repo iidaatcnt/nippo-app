@@ -690,6 +690,102 @@ async function viewEmployee(id) {
 
 // ---- 管理 ----
 
+// ---- 社員名簿 CSV の読み込み ----
+
+let lastImport = null; // 直前の一括登録の結果（招待リンク付き）。画面を描き直しても残す
+
+/** Excel で文字化けしない CSV（BOM 付き UTF-8）をダウンロードさせる */
+function downloadCsv(filename, rows) {
+  const cell = (v) => (/[",\r\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  const blob = new Blob(["\uFEFF" + rows.map((r) => r.map(cell).join(",")).join("\r\n") + "\r\n"], { type: "text/csv" });
+  const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/** UTF-8 で読めなければ Shift_JIS（日本語版 Excel の既定）として読む */
+async function readCsvFile(file) {
+  const buf = await file.arrayBuffer();
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    return new TextDecoder("shift_jis").decode(buf);
+  }
+}
+
+function importRowsTable(rows, withLinks) {
+  return `<div class="table-wrap"><table>
+    <tr><th>行</th><th>氏名</th><th>メールアドレス</th><th>役割</th><th>上長</th>${withLinks ? "<th>招待リンク</th>" : ""}</tr>
+    ${rows.map((r) => `<tr><td>${r.line}</td><td style="white-space:nowrap">${esc(r.name)}</td><td>${esc(r.email)}</td><td style="white-space:nowrap">${ROLE_LABEL[r.role]}</td><td>${esc(r.supervisor_email || "")}</td>${withLinks ? `<td><div class="invite-url">${esc(r.invite_url)}</div></td>` : ""}</tr>`).join("")}
+  </table></div>`;
+}
+
+function importResultHtml(res) {
+  return `<p><b>${res.rows.length}人を登録しました。</b>招待リンク（7日間有効）を本人に送ってください。</p>
+    <div class="row"><button type="button" class="primary" id="csv-links">招待リンクを CSV でダウンロード</button><button type="button" class="small" id="csv-close">閉じる</button></div>
+    ${importRowsTable(res.rows, true)}`;
+}
+
+function bindCsvImport(tenant) {
+  const box = document.getElementById("csv-result");
+  const bindResult = () => {
+    document.getElementById("csv-links")?.addEventListener("click", () =>
+      downloadCsv("invite_links.csv", [["氏名", "メールアドレス", "役割", "招待リンク"], ...lastImport.rows.map((r) => [r.name, r.email, ROLE_LABEL[r.role], r.invite_url])]),
+    );
+    document.getElementById("csv-close")?.addEventListener("click", () => {
+      lastImport = null;
+      box.innerHTML = "";
+    });
+  };
+  bindResult();
+  document.getElementById("csv-template").onclick = () =>
+    downloadCsv("employees_template.csv", [
+      ["氏名", "メールアドレス", "役割", "上長のメールアドレス"],
+      ["山田 太郎", "yamada@example.com", "社長", ""],
+      ["佐藤 花子", "sato@example.com", "上長", ""],
+      ["鈴木 一郎", "suzuki@example.com", "社員", "sato@example.com"],
+    ]);
+  document.getElementById("csv-file").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const csv = await readCsvFile(file);
+    let check;
+    try {
+      check = await api("/admin/users/import", { method: "POST", body: { tenant_id: tenant.id, csv, dry_run: true } });
+    } catch (ex) {
+      return toast(ex.message);
+    }
+    if (!check.ok) {
+      box.innerHTML = `<p class="error">${check.errors.length}件の問題があります。CSV を直してから、もう一度選んでください（まだ誰も登録していません）。</p>
+        <ul>${check.errors.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>`;
+      e.target.value = "";
+      return;
+    }
+    box.innerHTML = `<p>${check.rows.length}人を登録します。内容を確認してください。</p>
+      <div class="row"><button type="button" class="primary" id="csv-go">登録して招待リンクを発行</button><button type="button" class="small" id="csv-cancel">やめる</button><span class="error"></span></div>
+      ${importRowsTable(check.rows, false)}`;
+    document.getElementById("csv-cancel").onclick = () => {
+      box.innerHTML = "";
+      e.target.value = "";
+    };
+    document.getElementById("csv-go").onclick = async (ev) => {
+      ev.target.disabled = true;
+      try {
+        const res = await api("/admin/users/import", { method: "POST", body: { tenant_id: tenant.id, csv } });
+        if (!res.ok) throw new Error(res.errors.join(" / "));
+        lastImport = res;
+        toast(`${res.rows.length}人を登録しました`);
+        await viewAdmin();
+      } catch (ex) {
+        ev.target.disabled = false;
+        box.querySelector(".error").textContent = ex.message;
+      }
+    };
+  };
+}
+
 async function viewAdmin() {
   const tenantId = currentTenantId();
   const tenant = isLabor() ? currentTenant() : (await api("/admin/tenants"))[0];
@@ -739,6 +835,15 @@ async function viewAdmin() {
         <button type="submit" class="primary">招待リンクを発行</button>
       </form>
       <div id="invite"></div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">CSV でまとめて登録</h2>
+      <p class="muted">見出しが「氏名, メールアドレス, 役割, 上長のメールアドレス」の CSV を読み込みます。役割は 社員・上長・社長（空欄は社員）。上長は、同じ CSV の人か登録済みの人のメールアドレスで指定します。Excel で保存した CSV もそのまま使えます。</p>
+      <div class="row">
+        <button type="button" class="small" id="csv-template">ひな形をダウンロード</button>
+        <input type="file" id="csv-file" accept=".csv,text/csv">
+      </div>
+      <div id="csv-result">${lastImport ? importResultHtml(lastImport) : ""}</div>
     </div>
     <h2>ユーザー一覧</h2>
     <div class="table-wrap"><table>
@@ -799,6 +904,7 @@ async function viewAdmin() {
     document.getElementById("copy").onclick = () => navigator.clipboard.writeText(url).then(() => toast("コピーしました"));
     document.getElementById("invite").scrollIntoView({ behavior: "smooth" });
   };
+  bindCsvImport(tenant);
   onSubmit(document.getElementById("uf"), async (d) => {
     const res = await api("/admin/users", { method: "POST", body: { ...d, tenant_id: tenant.id } });
     await viewAdmin();
